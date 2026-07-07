@@ -1,6 +1,10 @@
 #include <Arduino.h>
 #include <ESP32Servo.h>
 #include <ESP32Encoder.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
 
 #define ENC_A_GPIO      4
 #define ENC_B_GPIO      5
@@ -9,7 +13,13 @@
 #define SERVO_PIN1      11
 #define SERVO_PIN2      10
 #define LIGHT_PIN       6
+#define I2C_SDA_PIN     8
+#define I2C_SCL_PIN     9
 
+#define OLED_I2C_ADDR   0x3C
+#define SCREEN_WIDTH    128
+#define SCREEN_HEIGHT   64
+#define OLED_RESET      -1
 #define DEBOUNCE_DELAY  200
 #define INTERVAL        500
 #define PAUSE_MAX       500
@@ -42,6 +52,7 @@ TimerHandle_t xTimerMotion = NULL;  // 1s随机动作检测
 
 ESP32Encoder encoder;
 Servo myServo1, myServo2;
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // 全局变量
 bool LedLightOn = false;
@@ -542,6 +553,109 @@ void Task_Periph(void *pvParameters) {
   }
 }
 
+void Task_OLED(void *pvParameters) {
+  (void)pvParameters;
+
+  // 初始化I2C与屏幕
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  if(!display.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDR)) 
+  {
+    // 初始化失败就死循环，串口会看不到输出，方便排查
+    for(;;) vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.display();
+  vTaskDelay(pdMS_TO_TICKS(500));
+
+  for(;;) 
+  {
+    //加锁后读取全部的重要数据
+    int local_mood;
+    bool local_isHungry;
+    unsigned long local_fullStart;
+    int local_motion;
+    bool local_isSleeping;
+
+    xSemaphoreTake(xMutexState, portMAX_DELAY);
+    local_mood = mood;
+    local_isHungry = isHungry;
+    local_fullStart = FullStart;
+    local_motion = motion;
+    local_isSleeping = isSleeping;
+    xSemaphoreGive(xMutexState);
+    //释放锁
+
+    display.clearDisplay();
+
+    // 睡眠状态：显示专属界面
+    if (local_isSleeping) 
+    {
+      display.setTextSize(2);
+      display.setCursor(22, 20);
+      display.print("Sleeping");
+      display.setTextSize(1);
+      display.setCursor(30, 48);
+      display.print("Z z z z...");
+    }
+    // 正常状态：显示完整信息
+    else {
+      // 第1行：心情值
+      display.setCursor(0, 0);
+      display.print("Mood: ");
+      display.print(local_mood);
+      display.print(" / 10");
+
+      // 第2行：饥饿/饱腹状态
+      display.setCursor(0, 16);
+      display.print("State: ");
+      if (local_isHungry) 
+      {
+        display.print("Hungry");
+      } 
+      else 
+      {
+        display.print("Full");
+      }
+
+      // 第3行：饱腹剩余时间
+      display.setCursor(0, 32);
+      display.print("Remain: ");
+      if (!local_isHungry) 
+      {
+        // 计算剩余秒数
+        long remain = (FULL_TIME - (millis() - local_fullStart)) / 1000;
+        if (remain < 0) remain = 0;
+        display.print(remain);
+        display.print("s");
+      } 
+      else 
+      {
+        display.print("--");
+      }
+
+      // 第4行：动作状态
+      display.setCursor(0, 48);
+      display.print("Motion: ");
+      switch(local_motion) 
+      {
+        case 0: display.print("NULL");   break;
+        case 1: display.print("PLAY");   break;
+        case 2: display.print("IDLE"); break;
+        case 3: display.print("TIRE");  break;
+        case 4: display.print("FOWD");     break;
+        default: display.print("???");
+      }
+    }
+
+    // 真正刷新到屏幕硬件
+    display.display();
+
+    // 300ms刷新一次，只阻塞本任务
+    vTaskDelay(pdMS_TO_TICKS(300));
+  }
+}
 
 void setup() {
   // put your setup code here, to run once:
@@ -575,11 +689,12 @@ void setup() {
   encoder.attachHalfQuad(ENC_A_GPIO, ENC_B_GPIO);
   encoder.setCount(0);
 
-  // 5. 创建任务（优先级：输入3 > 状态2 = 舵机2 > 外设1）
+  // 5. 创建任务（优先级：输入3 > 状态2 = 舵机2 > 外设1 > OLED显示）
   xTaskCreatePinnedToCore(Task_Input,   "TaskInput",   2048, NULL, 3, &TaskInput_Handle,   0);
   xTaskCreatePinnedToCore(Task_State,   "TaskState",   2048, NULL, 2, &TaskState_Handle,   0);
   xTaskCreatePinnedToCore(Task_Servo,   "TaskServo",   2048, NULL, 2, &TaskServo_Handle,   1);
   xTaskCreatePinnedToCore(Task_Periph,  "TaskPeriph",  3072, NULL, 1, &TaskPeriph_Handle,  1);
+  xTaskCreatePinnedToCore(Task_OLED,    "TaskOLED",    3072, NULL, 1, NULL, 1);
 
   // 6. 启动定时器
   xTimerStart(xTimerMood,   0);
