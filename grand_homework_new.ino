@@ -91,7 +91,7 @@ int readMoodSafe()
   return val;
 }
 
-// 修改心情值（加锁）
+// 修改心情值
 void writeMoodSafe(int val) 
 {
   xSemaphoreTake(xMutexState, portMAX_DELAY);
@@ -99,7 +99,7 @@ void writeMoodSafe(int val)
   xSemaphoreGive(xMutexState);
 }
 
-// 读取睡眠状态(加锁)
+// 读取睡眠状态
 bool readSleepSafe() 
 {
   bool val;
@@ -109,7 +109,7 @@ bool readSleepSafe()
   return val;
 }
 
-// 修改睡眠状态(加锁)
+// 修改睡眠状态
 void writeSleepSafe(bool val) 
 {
   xSemaphoreTake(xMutexState, portMAX_DELAY);
@@ -117,7 +117,7 @@ void writeSleepSafe(bool val)
   xSemaphoreGive(xMutexState);
 }
 
-// 读取饥饿状态(加锁)
+// 读取饥饿状态
 bool readHungrySafe() 
 {
   bool val;
@@ -127,7 +127,7 @@ bool readHungrySafe()
   return val;
 }
 
-// 修改饥饿状态(加锁)
+// 修改饥饿状态
 void writeHungrySafe(bool val) 
 {
   xSemaphoreTake(xMutexState, portMAX_DELAY);
@@ -342,8 +342,10 @@ void Task_State(void *pvParameters) {
   (void)pvParameters;
   for (;;) {
     // 1. 心情衰减定时器事件
-    if (xSemaphoreTake(xSemMoodTick, pdMS_TO_TICKS(10)) == pdPASS) {
-      if (readHungrySafe() && !readSleepSafe()) {
+    if (xSemaphoreTake(xSemMoodTick, pdMS_TO_TICKS(10)) == pdPASS) 
+    {
+      if (readHungrySafe() && !readSleepSafe()) 
+      {
         int curMood = readMoodSafe();
         int newMood = (curMood - 1 >= 1) ? curMood - 1 : 1;
         writeMoodSafe(newMood);
@@ -353,7 +355,8 @@ void Task_State(void *pvParameters) {
     }
 
     // 2. 随机动作定时器事件
-    if (xSemaphoreTake(xSemMotionTick, pdMS_TO_TICKS(10)) == pdPASS) {
+    if (xSemaphoreTake(xSemMotionTick, pdMS_TO_TICKS(10)) == pdPASS) 
+    {
       if (!readSleepSafe()) 
       {
         // 检查当前是否空闲
