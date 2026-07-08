@@ -2,9 +2,10 @@
 #include <ESP32Servo.h>
 #include <ESP32Encoder.h>
 #include <Wire.h>
-#include <Adafruit_GFX.h>
+#include <Adafruit_GFX.h>      
 #include <Adafruit_SSD1306.h>
-
+#include <Preferences.h>         //Flash相关头文件
+#include <esp_sleep.h>           //Deep-sleep对应头文件
 
 #define ENC_A_GPIO      4
 #define ENC_B_GPIO      5
@@ -24,10 +25,14 @@
 #define INTERVAL        500
 #define PAUSE_MAX       500
 #define SERVO_MID_ANGLE 90
-#define SLEEP_TIME      5000
+#define DEEP_SLEEP_TIME 5000
 #define FULL_TIME       120000
 #define LED_BLINK_TOTAL (INTERVAL * 2)
 #define BUTTON_COOLDOWN 10000
+#define DEEP_SLEEP_IDLE_MS   60000   // 30秒无操作即进入Deep-sleep状态
+
+#define NVS_CFG  "pet_cfg"   // 命名空间1：存实时状态
+#define NVS_MEM  "pet_mem"   // 命名空间2：存累计统计
 
 // 任务句柄
 TaskHandle_t TaskInput_Handle   = NULL;
@@ -53,6 +58,7 @@ TimerHandle_t xTimerMotion = NULL;  // 1s随机动作检测
 ESP32Encoder encoder;
 Servo myServo1, myServo2;
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+Preferences prefs;
 
 // 全局变量
 bool LedLightOn = false;
@@ -60,6 +66,8 @@ bool isSleeping = false;
 bool isHungry = true;
 int mood = 5;
 int motion = 0;
+int headTouchCount = 0;  //累计摸头次数
+int feedCount = 0;       //累计玩耍次数 
 long encoderCounter = 0;
 long counterStart = 0;
 
@@ -67,11 +75,99 @@ unsigned long LedStartMs = 0;
 unsigned long FullStart = 0;
 unsigned long LowlightStart = 0;
 unsigned long PauseStart = 0;
+unsigned long lastInteract = 0;
 bool LowlightFlag = true;
 bool encoderFlag = false;
 
+RTC_DATA_ATTR unsigned long bootMs = 0;         // 累计运行时间(ms)
+RTC_DATA_ATTR bool wasSleeping = false;         // 深睡触发原因：true=低光照睡眠，false=待机无操作
+
 // 中断共享变量
 volatile bool wakeupFlag = false;
+
+void saveStateToFlash() 
+{
+  // 保存状态到nvs_cfg命名空间(包括心情，动作，饱食状态，剩余的饱食秒数)
+  prefs.begin(NVS_CFG, false); 
+  prefs.putInt("mood", mood);
+  prefs.putBool("isHungry", isHungry);
+  
+  long fullRemainSec = 0;
+  if (!isHungry)
+  {
+    fullRemainSec = (FULL_TIME - (millis() - FullStart)) / 1000;
+    if (fullRemainSec < 0) fullRemainSec = 0;
+  }
+  prefs.putLong("fullRemain", fullRemainSec);
+  prefs.putInt("motion", motion);
+  prefs.end();  
+}
+
+void saveStateToMem()
+{
+  prefs.begin(NVS_MEM, false);
+  prefs.putInt("headCnt", headTouchCount);
+  prefs.putInt("feedCnt", feedCount);
+  prefs.end();
+}
+
+void loadStateFromFlash() 
+{
+  prefs.begin(NVS_CFG, true);  
+  mood = prefs.getInt("mood", 5);      //默认值非常重要，可以帮我垫好读入错误的底
+  isHungry = prefs.getBool("isHungry", true);
+  long fullRemainSec = prefs.getLong("fullRemain", 0);
+  motion = prefs.getInt("motion", 0);
+  prefs.end();
+
+  // 根据剩余秒数，反向推算 FullStart 时间戳（适配新的 millis 基准）
+  if (!isHungry && fullRemainSec > 0) 
+  {
+    FullStart = millis() - (FULL_TIME - fullRemainSec * 1000);
+  } 
+  else 
+  {
+    FullStart = 0;
+  }
+
+  prefs.begin(NVS_MEM, true);
+  headTouchCount = prefs.getInt("headCnt", 0);
+  feedCount = prefs.getInt("feedCnt", 0);
+  prefs.end();
+}
+
+void enterDeepSleep(bool isLightSleep) {
+  //记录进入休眠时的桌宠睡眠状态
+  wasSleeping = isLightSleep;
+
+  //记录本次CPU运行时长
+  bootMs += millis();
+
+  //OLED熄灭，舵机判断:(如果在睡觉时休眠，保持舵机位置，否则归中)
+  display.clearDisplay();
+  display.display();  
+
+  if (isLightSleep) 
+  {
+    myServo1.write(170);
+    myServo2.write(170);
+  } 
+  else 
+  {
+    ServoBackMid();
+  }
+
+  saveStateToFlash();
+  Serial.println("[SYSTEM] Entering deep sleep...");
+  delay(100);  
+
+  // 5. 设置唤醒源：按键按下（低电平）唤醒
+  // 你的按键是上拉输入，按下为低电平，所以第二个参数填0
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0);
+
+  // 6. 正式进入深度休眠，芯片几乎完全断电
+  esp_deep_sleep_start();
+}
 
 // 定时器发出到时间的信号
 void vTimerMoodCallback(TimerHandle_t xTimer) {
@@ -222,6 +318,11 @@ void Task_Input(void *pvParameters)
           if (now - lastValidPressMs < BUTTON_COOLDOWN) {}
           else
           {
+            lastInteract = millis();
+            headTouchCount++;
+            Serial.print(Head Touch!);
+            saveInteractionMem(); //立即写入Flash
+
             int curMood = readMoodSafe();
             writeMoodSafe(curMood < 10 ? curMood + 1 : 10);
             // 触发玩耍动作
@@ -286,6 +387,9 @@ void Task_Input(void *pvParameters)
         FullStart = millis();
         counterStart = encoderCounter;
         xSemaphoreGive(xMutexState);
+        lastInteract = millis();
+        feedCount++;
+        saveInteractionMem();
         Serial.println("Feeding process successful!");
       }
     }
@@ -306,7 +410,7 @@ void Task_Input(void *pvParameters)
     xSemaphoreGive(xMutexState);
 
     // 满足睡眠条件
-    if ((millis() - LowlightStart >= SLEEP_TIME) && (lightState == HIGH) && !readSleepSafe()) {
+    if ((millis() - LowlightStart >= DEEP_SLEEP_TIME) && (lightState == HIGH) && !readSleepSafe()) {
       Serial.println("光照不足!我睡觉去了~");
       // 进入睡眠（交给状态任务统一处理）
       writeSleepSafe(true);
@@ -327,7 +431,6 @@ void Task_Input(void *pvParameters)
       xTimerStart(xTimerMood, 0);
       xTimerStart(xTimerMotion, 0);
       // 舵机回中
-      ServoBackMid();
       xSemaphoreTake(xMutexState, portMAX_DELAY);
       LowlightStart = millis();
       xSemaphoreGive(xMutexState);
@@ -396,6 +499,19 @@ void Task_State(void *pvParameters) {
         writeHungrySafe(true);
         Serial.println("饱腹结束，我又饿了！");
       }
+    }
+
+    unsigned long now = millis();
+
+    xSemaphoreTake(xMutexState, portMAX_DELAY);
+    bool tempisSleeping = isSleeping;
+    unsigned long templastInteract = lastInteract;
+    xSemaphoreGive(xMutexState);
+    if (now - templastInteract >= DEEP_SLEEP_IDLE_MS)
+    {
+      if (tempisSleeping)
+        enterSleepMode(true);
+      else enterSleepMode(false);
     }
 
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -702,6 +818,43 @@ void setup() {
   // 6. 启动定时器
   xTimerStart(xTimerMood,   0);
   xTimerStart(xTimerMotion, 0);
+
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+  //判断
+  if (wakeup_reason != ESP_SLEEP_WAKEUP_UNDEFINED) 
+  {
+    // 从深睡唤醒 → 读Flash恢复状态
+    Serial.println("[SYSTEM] Wake up from deep sleep!");
+    loadStateFromFlash();
+    bootMs += millis();  // 累计运行时长
+  } 
+  else 
+  {
+    Serial.println("[SYSTEM] Cold boot!");
+    bootMs = 0;
+    headTouchCount = 0;
+    feedCount = 0;
+    Serial.print(bootMs);
+    Serial.print(headTouchCount);
+    Serial.print(feedCount);
+  }
+
+  if (wasSleeping) 
+  {
+    // 低光照睡眠唤醒 → 保持睡眠姿态，不回中
+    myServo1.write(170);
+    myServo2.write(170);
+    wasSleeping = false; // 用完重置标记
+    isSleeping = true;
+  } 
+  else 
+  {
+    // 待机唤醒/冷启动 → 舵机回中立位
+    ServoBackMid();
+  }
+
+  lastInteract = millis();
+  Serial.println("[SYSTEM] Init done!");
 
   randomSeed(analogRead(0)); // 初始化随机数种子
   Serial.println("桌宠RTOS系统启动完成!");
