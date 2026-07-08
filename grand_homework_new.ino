@@ -146,6 +146,7 @@ void enterDeepSleep(bool isLightSleep) {
   //OLED熄灭，舵机判断:(如果在睡觉时休眠，保持舵机位置，否则归中)
   display.clearDisplay();
   display.display();  
+  display.ssd1306_command(0xAE);
 
   if (isLightSleep) 
   {
@@ -301,7 +302,7 @@ void Task_Input(void *pvParameters)
 {
   (void)pvParameters;
 
-  static unsigned long lastValidPressMs = 0;
+  static unsigned long lastValidPressMs = (unsigned long)-BUTTON_COOLDOWN;
 
   for (;;) {
     // 1. 等待按键事件（阻塞等待，不占CPU）
@@ -320,8 +321,8 @@ void Task_Input(void *pvParameters)
           {
             lastInteract = millis();
             headTouchCount++;
-            Serial.print(Head Touch!);
-            saveInteractionMem(); //立即写入Flash
+            Serial.println("Head Touch!");
+            saveStateToMem(); //立即写入Flash
 
             int curMood = readMoodSafe();
             writeMoodSafe(curMood < 10 ? curMood + 1 : 10);
@@ -389,7 +390,7 @@ void Task_Input(void *pvParameters)
         xSemaphoreGive(xMutexState);
         lastInteract = millis();
         feedCount++;
-        saveInteractionMem();
+        saveStateToMem();
         Serial.println("Feeding process successful!");
       }
     }
@@ -510,8 +511,8 @@ void Task_State(void *pvParameters) {
     if (now - templastInteract >= DEEP_SLEEP_IDLE_MS)
     {
       if (tempisSleeping)
-        enterSleepMode(true);
-      else enterSleepMode(false);
+        enterDeepSleep(true);
+      else enterDeepSleep(false);
     }
 
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -834,9 +835,6 @@ void setup() {
     bootMs = 0;
     headTouchCount = 0;
     feedCount = 0;
-    Serial.print(bootMs);
-    Serial.print(headTouchCount);
-    Serial.print(feedCount);
   }
 
   if (wasSleeping) 
@@ -858,6 +856,9 @@ void setup() {
 
   randomSeed(analogRead(0)); // 初始化随机数种子
   Serial.println("桌宠RTOS系统启动完成!");
+  Serial.println(bootMs);
+  Serial.println(headTouchCount);
+  Serial.println(feedCount);
 }
 
 void loop() {
