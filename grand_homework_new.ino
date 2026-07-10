@@ -9,13 +9,13 @@
 
 #define ENC_A_GPIO      4
 #define ENC_B_GPIO      5
-#define BUTTON_PIN      13
+#define BUTTON_PIN      21
 #define LED_PIN         14
 #define SERVO_PIN1      11
 #define SERVO_PIN2      10
 #define LIGHT_PIN       6
-#define I2C_SDA_PIN     8
-#define I2C_SCL_PIN     9
+#define I2C_SDA_PIN     2
+#define I2C_SCL_PIN     1
 
 #define OLED_I2C_ADDR   0x3C
 #define SCREEN_WIDTH    128
@@ -150,7 +150,7 @@ void enterDeepSleep(bool isLightSleep) {
 
   if (isLightSleep) 
   {
-    myServo1.write(170);
+    myServo1.write(10);
     myServo2.write(170);
   } 
   else 
@@ -244,10 +244,10 @@ void Motion_Play() //动作1---玩耍
   for (int i = 0;i < 3;i++)
   {
     myServo1.write(45);
-    myServo2.write(45);
+    myServo2.write(135);
     vTaskDelay(pdMS_TO_TICKS(300)); //RTOS自有的Tick“标准”
     myServo1.write(135);
-    myServo2.write(135);
+    myServo2.write(45);
     vTaskDelay(pdMS_TO_TICKS(300));
   }
   ServoBackMid();
@@ -260,7 +260,7 @@ void Motion_Wander()  //动作2---闲逛
   for (int i = 0;i < 3;i++)
   {
     myServo1.write(30);
-    myServo2.write(30);
+    myServo2.write(150);
     vTaskDelay(pdMS_TO_TICKS(600));
     ServoBackMid();
     vTaskDelay(pdMS_TO_TICKS(600));
@@ -419,7 +419,7 @@ void Task_Input(void *pvParameters)
       xTimerStop(xTimerMood, 0);
       xTimerStop(xTimerMotion, 0);
       // 舵机归位睡眠姿态
-      myServo1.write(170);
+      myServo1.write(10);
       myServo2.write(170);
       Serial.println("Sleep Mode On!");
     }
