@@ -29,7 +29,7 @@
 #define FULL_TIME       120000
 #define LED_BLINK_TOTAL (INTERVAL * 2)
 #define BUTTON_COOLDOWN 10000
-#define DEEP_SLEEP_IDLE_MS   60000   // 30秒无操作即进入Deep-sleep状态
+#define DEEP_SLEEP_IDLE_MS   60000   // 60秒无操作即进入Deep-sleep状态
 
 #define NVS_CFG  "pet_cfg"   // 命名空间1：存实时状态
 #define NVS_MEM  "pet_mem"   // 命名空间2：存累计统计
@@ -245,13 +245,13 @@ void Motion_Play() //动作1---玩耍
   {
     myServo1.write(45);
     myServo2.write(135);
-    vTaskDelay(pdMS_TO_TICKS(300)); //RTOS自有的Tick“标准”
+    if (delayInterruptable(300)) return; 
     myServo1.write(135);
     myServo2.write(45);
-    vTaskDelay(pdMS_TO_TICKS(300));
+    if (delayInterruptable(300)) return; 
   }
   ServoBackMid();
-  vTaskDelay(pdMS_TO_TICKS(200));
+  if (delayInterruptable(200)) return; 
   motion = 0;
 }
 
@@ -261,11 +261,11 @@ void Motion_Wander()  //动作2---闲逛
   {
     myServo1.write(30);
     myServo2.write(150);
-    vTaskDelay(pdMS_TO_TICKS(600));
+    if (delayInterruptable(600)) return; 
     ServoBackMid();
-    vTaskDelay(pdMS_TO_TICKS(600));
+    if (delayInterruptable(600)) return; 
   }
-  vTaskDelay(pdMS_TO_TICKS(400));
+  if (delayInterruptable(400)) return; 
   motion = 0;
 }
 
@@ -274,13 +274,13 @@ void Motion_Tired()  //动作3---疲惫
   for (int i = 0;i < 2;i++)
   {
     myServo1.write(120);
-    vTaskDelay(pdMS_TO_TICKS(600));
+    if (delayInterruptable(600)) return; 
     myServo1.write(140);
-    vTaskDelay(pdMS_TO_TICKS(600));
+    if (delayInterruptable(600)) return; 
   }
   ServoBackMid();
   //RTOS优化：将干等Delay()改为vTaskDelay，在未到达600Ticks之前让出CPU给其他任务
-  vTaskDelay(pdMS_TO_TICKS(600));     
+  if (delayInterruptable(600)) return;      
   motion = 0;
 }
 
@@ -290,13 +290,37 @@ void Motion_GoAhead()  //动作4---前进
   {
     myServo1.write(20);
     myServo2.write(160);
-    vTaskDelay(pdMS_TO_TICKS(600));
+    if (delayInterruptable(600)) return; 
     ServoBackMid();
-    vTaskDelay(pdMS_TO_TICKS(600));
+    if (delayInterruptable(600)) return; 
   }
-  vTaskDelay(pdMS_TO_TICKS(400));
+  if (delayInterruptable(400)) return; 
   motion = 0;
 }
+//强制打断动作函数（适用于按钮玩耍动作的强制打断和串口强制命令的打断）
+void forceSetAction(int cmd) 
+{
+  // 1. 复位队列，清空所有未执行的旧命令
+  xQueueReset(xQueueServoCmd);
+  // 2. 发送新命令（队列已空，会立刻被舵机任务取到）
+  xQueueSend(xQueueServoCmd, &cmd, 0);
+}
+
+bool delayInterruptable(int ms) 
+{
+  // 拆成10ms一段，每段都检查队列
+  for(int i=0; i < ms/10; i++) 
+  {
+    vTaskDelay(pdMS_TO_TICKS(10));
+    // 队列里有新消息 → 有打断命令
+    if(uxQueueMessagesWaiting(xQueueServoCmd) > 0) 
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
 //高优先级：按键事件、编码器喂食检测、光敏睡眠检测
 void Task_Input(void *pvParameters) 
 {
@@ -325,7 +349,7 @@ void Task_Input(void *pvParameters)
             saveStateToMem(); //立即写入Flash
 
             int curMood = readMoodSafe();
-            writeMoodSafe(curMood < 10 ? curMood + 1 : 10);
+            writeMoodSafe(curMood < 10 + int(headTouchCount * 0.1) ? curMood + 1 : 10 + int(headTouchCount * 0.1));
             // 触发玩耍动作
 
             // 触发LED闪烁
@@ -337,8 +361,7 @@ void Task_Input(void *pvParameters)
             }
             xSemaphoreGive(xMutexState);
 
-            int cmd = 1;
-            xQueueSend(xQueueServoCmd, &cmd, 0);
+            forceSetAction(1);
             lastValidPressMs = now;
           }
         } 
@@ -382,7 +405,8 @@ void Task_Input(void *pvParameters)
       }
 
       // 反转一圈触发喂食
-      if ((encoderCounter - counterStart <= -40) && readHungrySafe()) {
+      if ((encoderCounter - counterStart <= -40)) 
+      {
         writeHungrySafe(false);
         xSemaphoreTake(xMutexState, portMAX_DELAY);
         FullStart = millis();
@@ -432,6 +456,7 @@ void Task_Input(void *pvParameters)
       xTimerStart(xTimerMood, 0);
       xTimerStart(xTimerMotion, 0);
       // 舵机回中
+      ServoBackMid();
       xSemaphoreTake(xMutexState, portMAX_DELAY);
       LowlightStart = millis();
       xSemaphoreGive(xMutexState);
@@ -523,7 +548,8 @@ void Task_State(void *pvParameters) {
 void Task_Servo(void *pvParameters) {
   (void)pvParameters;
   int cmd = 0;
-  for (;;) {
+  for (;;) 
+  {
     // 阻塞等待舵机命令，没命令就无限休眠下去
     if (xQueueReceive(xQueueServoCmd, &cmd, portMAX_DELAY) == pdPASS) {
       if (readSleepSafe()) continue; // 睡眠时忽略动作命令
@@ -598,7 +624,7 @@ void Task_Periph(void *pvParameters) {
         int newmot = argStr.toInt();
         if (newmot >= 0 && newmot <= 4) 
         {
-          xQueueSend(xQueueServoCmd, &newmot, 0);
+          forceSetAction(newmot);
           Serial.print("动作已经设置为:");
           Serial.println(newmot);
         } 
@@ -725,7 +751,8 @@ void Task_OLED(void *pvParameters) {
       display.setCursor(0, 0);
       display.print("Mood: ");
       display.print(local_mood);
-      display.print(" / 10");
+      display.print(" / ");
+      display.print(10 + int(headTouchCount * 0.1));
 
       // 第2行：饥饿/饱腹状态
       display.setCursor(0, 16);
@@ -762,9 +789,9 @@ void Task_OLED(void *pvParameters) {
       {
         case 0: display.print("NULL");   break;
         case 1: display.print("PLAY");   break;
-        case 2: display.print("IDLE"); break;
-        case 3: display.print("TIRE");  break;
-        case 4: display.print("FOWD");     break;
+        case 2: display.print("IDLE");   break;
+        case 3: display.print("TIRE");   break;
+        case 4: display.print("FOWD");   break;
         default: display.print("???");
       }
     }
@@ -856,9 +883,15 @@ void setup() {
 
   randomSeed(analogRead(0)); // 初始化随机数种子
   Serial.println("桌宠RTOS系统启动完成!");
-  Serial.println(bootMs);
-  Serial.println(headTouchCount);
-  Serial.println(feedCount);
+  Serial.print("The system for the intelligent pet has worked for ");
+  Serial.print(bootMs);
+  Serial.println(" s");
+  Serial.print("You have interacted with the pet for ");
+  Serial.print(headTouchCount);
+  Serial.println(" times");
+  Serial.print("You have fed the pet for ");
+  Serial.print(feedCount);
+  Serial.println(" times");
 }
 
 void loop() {
